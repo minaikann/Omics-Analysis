@@ -1,4 +1,4 @@
-<img width="1688" height="220" alt="image" src="https://github.com/user-attachments/assets/43b080b3-44ff-42c8-af91-34a9d5358e3a" /># Exploratory Replication of Kim et al. (2020)
+# Exploratory Replication of Kim et al. (2020)
 
 ## Overview
 
