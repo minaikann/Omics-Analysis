@@ -1,8 +1,6 @@
 ---
 title: "Multi-Omics Analysis of Adenomas"
 author: "Deborah Mina Ikann"
-date: "`r Sys.Date()`"
-
 ---
 
 ```{r setup, include=FALSE}
