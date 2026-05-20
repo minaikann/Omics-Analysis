@@ -1,0 +1,344 @@
+---
+title: "Adenomas"
+author: "Deborah Mina Ikann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(readr)
+library(limma)        # differential testing (empirical Bayes)
+library(ggplot2)      # plotting
+library(qqman)        # quick QQ and Manhattan plots (genomics style)
+library(qqplotr)      # ggplot2-friendly QQ plots
+library(mixOmics)     # DIABLO and other multi-omics methods
+library(glmnet)       # Lasso / elastic net
+library(data.table)   # fast I/O and data handling
+```
+
+
+```{r}
+
+# Read the table
+mtb <- read_tsv("mtb.tsv", show_col_types = FALSE)
+
+# 1. Save the first column as a vector
+first_col <- mtb[[1]]
+
+# 2. Set it as rownames
+mtb <- as.data.frame(mtb)   # ensure it's a data frame
+rownames(mtb) <- first_col
+
+# 3. Remove the first column from the data
+mtb <- mtb[ , -1, drop = FALSE]
+
+
+metadata <- read_tsv(
+  "metadata.tsv",
+  show_col_types = FALSE
+)
+
+# Read the table
+Meg <- read_tsv("genera.counts.tsv", show_col_types = FALSE)
+
+# Convert tibble → data frame (tibbles do not support rownames)
+Meg <- as.data.frame(Meg)
+
+# Save the first column as rownames
+rownames(Meg) <- Meg[[1]]
+
+# Remove the first column
+Meg <- Meg[ , -1, drop = FALSE]
+
+metadata$Sample
+```
+## Data Pre processing 
+
+```{r}
+# 1. Extract clean sample IDs from metadata
+ids <- metadata$Sample
+
+# 2. Extract rownames from mtb and Meg
+ids_mtb <- rownames(mtb)
+ids_meg <- rownames(Meg)
+
+# 3. Check which metadata IDs are missing in mtb and Meg
+setdiff(ids, ids_mtb)
+setdiff(ids, ids_meg)
+
+# 4. Check which mtb or Meg IDs are not in metadata
+setdiff(ids_mtb, ids)
+setdiff(ids_meg, ids)
+
+# 5. Quick TRUE/FALSE check for perfect matching
+all(ids %in% ids_mtb)
+all(ids %in% ids_meg)
+
+```
+## =============================================================================
+## Metabolomics data 
+## =============================================================================
+
+```{r}
+# Histogram for each metabolite
+# Boxplots for all metabolites
+boxplot(mtb, las = 2, col = "lightgreen", main = "Metabolomics Boxplots")
+boxplot(t(mtb), las = 2, cex.axis = 0.6, col = "lightgreen", outline = FALSE)
+# Missingness
+colSums(is.na(mtb))
+# SD or IQR instead of CV
+sds <- sapply(mtb, sd, na.rm = TRUE)
+hist(sds, main = "SD of metabolites")
+
+```
+## Check for the covarates to be sure before doing the diff analysis 
+```{r}
+library(mixOmics)
+
+# Match samples
+mtb_DA <- mtb[rownames(mtb) %in% metadata$Sample, , drop = FALSE]
+# mtb_DA: samples x metabolites
+
+group <- metadata$Study.Group[match(rownames(mtb_DA), metadata$Sample)]
+group <- factor(group)
+
+mtb_scaled <- scale(mtb_DA, center = TRUE, scale = TRUE)
+# PCA on all samples together
+pca.mtb <- pca(mtb_scaled, ncomp = 5, center = TRUE, scale = TRUE)
+
+my_cols <- c("#1b9e77", "#d95f02","#7570b3")
+
+plotIndiv(
+  pca.mtb,
+  group     = group,
+  ind.names = FALSE,
+  ellipse   = TRUE,
+  legend    = TRUE,
+  pch       = 1,
+  cex       = 1.4,
+  col       = my_cols
+)
+
+table(group)
+plotVar(pca.mtb, var.names = FALSE, title = "Metabolite loadings")
+
+
+```
+## test for covarattes 
+
+```{r}
+
+# 1. Ensure rownames of mtb_DA are sample IDs
+rownames(mtb_DA)  # should look like "H001", "A004", etc.
+
+# 2. Reorder metadata to match mtb_DA
+idx <- match(rownames(mtb_DA), metadata$Sample)
+metadata_aligned <- metadata[idx, ]
+
+# Check alignment
+stopifnot(all(metadata_aligned$Sample == rownames(mtb_DA)))
+Group   <- factor(metadata_aligned$Study.Group)
+Sex     <- factor(metadata_aligned$Gender)
+Smoking <- factor(metadata_aligned$`Chem ID / Smoking history`)
+AgeGroup <- factor(metadata_aligned$Age)
+Race <- factor(metadata_aligned$Race)
+
+tab_sex <- table(Group, Sex)
+tab_sex
+fisher.test(tab_sex)
+
+
+tab_smoke <- table(Group, Smoking)
+tab_smoke
+fisher.test(tab_smoke)
+
+tab_age <- table(Group,AgeGroup)
+tab_age
+fisher.test(tab_age)
+
+tab_race <- table(Group,Race)
+tab_race
+fisher.test(tab_race)
+```
+
+## DEA of Metabolites Using LIMMA 
+
+```{r}
+library(limma)
+
+## 1. Make sure mtb_DA orientation is correct
+## limma expects rows = features, columns = samples.
+## If your rows are samples, transpose first:
+mtb_DA <- t(mtb_DA)
+
+## 2. Group factor aligned to sample order
+group <- factor(
+  metadata_aligned$Study.Group[match(colnames(mtb_DA), metadata_aligned$Sample)],
+  levels = c("Control", "Adenoma", "Carcinoma")  # adjust if needed
+)
+names(group) <- colnames(mtb_DA)
+
+## 3. Design matrix
+design <- model.matrix(~ -1 + group)
+colnames(design)
+# should be: "groupControl" "groupAdenoma" "groupCarcinoma"
+
+table(group)   # check sample counts per group
+
+## 4. Fit limma model
+fit  <- lmFit(mtb_DA, design)
+fit  <- eBayes(fit)
+
+## 5. Correct contrasts (note the exact column names)
+cont.matrix <- makeContrasts(
+  Adenoma_vs_Control    = groupAdenoma   - groupControl,
+  Carcinoma_vs_Control  = groupCarcinoma - groupControl,
+  Carcinoma_vs_Adenoma  = groupCarcinoma - groupAdenoma,
+  levels = design
+)
+
+fit2 <- contrasts.fit(fit, cont.matrix)
+fit2 <- eBayes(fit2)
+
+## 6. Extract tables
+
+# Adenoma vs Control
+tt_adenoma <- topTable(
+  fit2,
+  coef = "Adenoma_vs_Control",
+  number = Inf,
+  adjust.method = "BH"
+)
+tt_adenoma$FC          <- 2 ^ (tt_adenoma$logFC)
+tt_adenoma$negLog10FDR <- -log10(tt_adenoma$adj.P.Val)
+
+# Carcinoma vs Control
+tt_carcinoma_control <- topTable(
+  fit2,
+  coef = "Carcinoma_vs_Control",
+  number = Inf,
+  adjust.method = "BH"
+)
+tt_carcinoma_control$FC          <- 2 ^ (tt_carcinoma_control$logFC)
+tt_carcinoma_control$negLog10FDR <- -log10(tt_carcinoma_control$adj.P.Val)
+
+# Carcinoma vs Adenoma
+tt_carcinoma_adenoma <- topTable(
+  fit2,
+  coef = "Carcinoma_vs_Adenoma",
+  number = Inf,
+  adjust.method = "BH"
+)
+tt_carcinoma_adenoma$FC          <- 2 ^ (tt_carcinoma_adenoma$logFC)
+tt_carcinoma_adenoma$negLog10FDR <- -log10(tt_carcinoma_adenoma$adj.P.Val)
+```
+
+
+```{r}
+library(globaltest)
+
+# samples x metabolites
+X <- t(mtb_DA )  # rows = samples, cols = metabolites (your code already uses this)
+
+stopifnot(all(rownames(X) == metadata_aligned$Sample))
+
+meta <- metadata_aligned
+meta$Study.Group <- factor(meta$Study.Group)
+
+# subset to Control and Adenoma
+sub_AC  <- meta$Study.Group %in% c("Control", "Adenoma")
+X_AC    <- X[sub_AC, , drop = FALSE]
+meta_AC <- droplevels(meta[sub_AC, , drop = FALSE])
+
+
+
+# check levels
+levels(meta_AC$Study.Group)
+
+# Globaltest without covariates:
+# response = Study.Group (factor), covariates = X_AC (metabolites)
+gt_AC <- gt(meta_AC$Study.Group, X_AC)
+summary(gt_AC)
+
+# Globaltest **with** covariates (Age, Sex) uses the formula interface:
+# null model: Study.Group ~ Age + Sex
+# alternative: add the metabolite set (X_AC)
+gt_AC_adj <- gt(Study.Group ~ Age + Gender, X_AC, data = meta_AC)
+summary(gt_AC_adj)
+
+```
+
+## =============================================================================
+## Metagenomics  data 
+## =============================================================================
+
+
+```{r}
+# assume meg: rows = samples, cols = features (genes/metabolites)
+dim(meg)
+
+# filter features with total count > 10 (adjust threshold if needed)
+meg <- meg[, colSums(meg) > 10]
+dim(meg)
+library(vegan)
+
+alpha_shannon <- diversity(, index = "shannon")
+alpha_df <- data.frame(
+  Sample = names(alpha_shannon),
+  Shannon = alpha_shannon,
+  Group = metadata_aligned$Study.Group
+)
+
+ggplot(alpha_df, aes(Group, Shannon, fill = Group)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+  geom_jitter(width = 0.15, size = 1.5, alpha = 0.8) +
+  theme_bw() +
+  labs(y = "Shannon diversity", x = "", title = "Alpha diversity by group")
+```
+
+```{r}
+library(vegan)
+library(ggplot2)
+library(dplyr)
+
+X <- meg              # samples x taxa
+meta <- metadata_aligned
+
+stopifnot(all(rownames(X) == meta$Sample))
+
+# Bray–Curtis distance (common for microbiome)
+dist_bc <- vegdist(X, method = "bray")
+
+# PCoA using base R cmdscale
+pcoa_res <- cmdscale(dist_bc, eig = TRUE, k = 2)  # 2D solution
+
+pcoa_df <- data.frame(
+  Sample = rownames(X),
+  PC1 = pcoa_res$points[, 1],
+  PC2 = pcoa_res$points[, 2]
+)
+
+# merge with metadata
+pcoa_df <- left_join(
+  pcoa_df,
+  meta,
+  by = "Sample"
+)
+
+# percentage of variance explained
+var_expl <- 100 * pcoa_res$eig[1:2] / sum(pcoa_res$eig[pcoa_res$eig > 0])
+
+ggplot(pcoa_df, aes(x = PC1, y = PC2, color = Study.Group)) +
+  geom_point(size = 2, alpha = 0.9) +
+  theme_bw() +
+  labs(
+    x = paste0("PCoA1 (", round(var_expl[1], 1), "%)"),
+    y = paste0("PCoA2 (", round(var_expl[2], 1), "%)"),
+    color = "Group",
+    title = "PCoA of microbiome profiles by group"
+  )
+```
