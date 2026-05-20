@@ -1,0 +1,1127 @@
+---
+title: "HELA_Multi_omics_Analysis"
+author: "Deborah,Yann,Brignt"
+---
+
+## Overview
+This notebook contains an exploratory multi-omics analysis based on HeLa cell 
+cycle data, using mRNA, translation and protein measurements done with my collegues Yann KEITA, Bright and Myself.
+The workflow is inspired by, and uses data originating from, the study:
+
+**“Uncovering Hidden Layers of Cell Cycle Regulation through Integrative Multi-omic Analysis”
+Ranen Aviner, Anjana Shenoy, Orna Elroy-Stein, Tamar Geiger (PLoS Genetics, 2015).**
+
+The aim is purely educational: to reproduce and extend some of the original analyses, 
+explore integrative methods (PCA, sPCA, PLS, sPLS, DIABLO, network analysis), 
+and practice working with multi-omics tools such as mixOmics, igraph, and netOmics, 
+not to generate new biological or clinical conclusions.
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(mixOmics)
+library(igraph)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(gprofiler2)
+library(BiocParallel)
+library(netOmics)
+library(dplyr)
+library(DT)
+```
+## =============================================================================
+## Data Processing
+## =============================================================================
+
+```{r}
+
+info <- data_hela$sample_info
+rna     <- data_hela$mRNA
+protein <- data_hela$protein
+trans   <- data_hela$trans
+
+cat("Number of samples and genes in the mRNA data ", dim(rna), "\n")
+cat("Number of samples and transcripts ", dim(trans), "\n")
+cat("Number of samples and proteins ", dim(protein), "\n")
+```
+
+```{r}
+head(rownames(rna))
+summary(as.factor(info$Y))
+```
+
+```{r}
+boxplot(rna[,1:100],     col = as.factor(info$sample), main = "Boxplot mRNA (first 100 genes)")
+boxplot(protein[,1:100], col = as.factor(info$sample), main = "Boxplot protein (first 100 proteins)")
+boxplot(trans[,1:100],   col = as.factor(info$sample), main = "Boxplot trans (first 100 transcripts)")
+```
+
+```{r}
+boxplot(t(rna),     col = as.factor(info$sample), main = "Boxplot mRNA by sample")
+boxplot(t(protein), col = as.factor(info$sample), main = "Boxplot protein by sample")
+boxplot(t(trans),   col = as.factor(info$sample), main = "Boxplot trans by sample")
+```
+
+```{r}
+boxplot(t(rna),     col = as.factor(info$Y), main = "Boxplot mRNA by class")
+boxplot(t(protein), col = as.factor(info$Y), main = "Boxplot protein by class")
+boxplot(t(trans),   col = as.factor(info$Y), main = "Boxplot trans by class")
+```
+
+```{r}
+coef.var <- function(x) {
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  if (is.na(m) || m == 0) return(NA_real_)
+  s / m
+}
+
+# Filter mRNA
+rna <- rna[, colSums(rna) > 10]
+coef.mRNA <- sapply(rna, coef.var)
+coef.mRNA <- coef.mRNA[!is.na(coef.mRNA)]
+hist(coef.mRNA, main = "Coefficient of variation (mRNA)")
+
+rna.filtered <- rna[, abs(coef.mRNA) > 0.02]
+rna.names    <- names(coef.mRNA)[abs(coef.mRNA) > 0.02]
+top10_rna    <- names(sort(abs(coef.mRNA), decreasing = TRUE))[1:min(10, length(coef.mRNA))]
+```
+
+```{r}
+# Filter protein
+protein <- protein[, colSums(protein) > 10]
+coef.protein <- sapply(protein, coef.var)
+coef.protein <- coef.protein[!is.na(coef.protein)]
+hist(coef.protein, main = "Coefficient of variation (protein)")
+
+protein.filtered <- protein[, abs(coef.protein) > 0.02]
+protein.names    <- names(coef.protein)[abs(coef.protein) > 0.02]
+top10_protein    <- names(sort(abs(coef.protein), decreasing = TRUE))[1:min(10, length(coef.protein))]
+```
+
+```{r}
+# Filter transcripts
+trans <- trans[, colSums(trans) > 10]
+coef.trans <- sapply(trans, coef.var)
+coef.trans <- coef.trans[!is.na(coef.trans)]
+hist(coef.trans, main = "Coefficient of variation (trans)")
+
+trans.filtered <- trans[, abs(coef.trans) > 0.02]
+trans.names    <- names(coef.trans)[abs(coef.trans) > 0.02]
+top10_trans    <- names(sort(abs(coef.trans), decreasing = TRUE))[1:min(10, length(coef.trans))]
+```
+
+```{r}
+# Scaling
+rna.scaled <- scale(rna.filtered, center = TRUE, scale = TRUE)
+hist(rna.scaled, main = "Histogram after scaling (mRNA)")
+
+meds <- apply(protein.filtered, 2, median, na.rm = TRUE)
+protein.scaled <- sweep(protein.filtered, 2, meds, "-")
+protein.scaled <- as.matrix(protein.scaled)
+hist(protein.scaled, main = "Histogram after scaling (protein)")
+
+trans.scaled <- scale(trans.filtered, center = TRUE, scale = TRUE)
+hist(trans.scaled, main = "Histogram after scaling (trans)")
+```
+
+```{r}
+boxplot(t(rna.scaled),     col = as.factor(info$sample), main = "Scaled mRNA by sample")
+boxplot(t(protein.scaled), col = as.factor(info$sample), main = "Scaled protein by sample")
+boxplot(t(trans.scaled),   col = as.factor(info$sample), main = "Scaled trans by sample")
+
+cat("RNA features kept:",     length(rna.names), "\\n")
+cat("Protein features kept:", length(protein.names), "\\n")
+cat("Trans features kept:",   length(trans.names), "\\n")
+top10_rna
+top10_protein
+top10_trans
+```
+
+## =============================================================================
+## PCA
+## =============================================================================
+
+```{r}
+sample <- as.factor(info$Y)  # grouping factor for plots
+
+# PCA for each omics block
+pca.rna     <- pca(X = rna.scaled,     ncomp = 5)
+pca.trans   <- pca(X = trans.scaled,   ncomp = 5)
+pca.protein <- pca(X = protein.scaled, ncomp = 5)
+
+pca.rna
+pca.trans
+pca.protein
+
+# Sample plots
+ plotIndiv(pca.rna,     group = sample, legend = TRUE, main = "mRNA PCA")
+plotIndiv(pca.trans,   group = sample, legend = TRUE, main = "Transcript PCA")
+plotIndiv(pca.protein, group = sample, legend = TRUE, main = "Protein PCA")
+
+# Scree plots
+plot(pca.rna)
+plot(pca.trans)
+plot(pca.protein)
+```
+
+```{r}
+# Correlation circle plots (variables)
+par(mfrow = c(1, 3))
+plotVar(pca.rna,     var.names = FALSE, title = "RNA")
+plotVar(pca.trans,   var.names = FALSE, title = "Trans")
+plotVar(pca.protein, var.names = FALSE, title = "Protein")
+par(mfrow = c(1, 1))
+```
+
+```{r}
+# Top contributing transcript variables to PC1
+load_trans <- pca.trans$loadings$X[, 1]
+ord        <- order(abs(load_trans), decreasing = TRUE)
+top_trans  <- names(load_trans)[ord][1:10]
+
+# g:Profiler enrichment for top PCA transcripts
+res.trans.pca <- gost(
+  query             = top_trans,
+  organism          = "hsapiens",
+  correction_method = "fdr",
+  evcodes           = TRUE
+)
+
+gostplot(res.trans.pca)
+
+res_tab <- res.trans.pca$result
+res_tab$p_adj <- p.adjust(res_tab$p_value, method = "fdr")
+
+res_trans_pca_simple <- res_tab[, c(
+  "source",
+  "term_name",
+  "p_value",
+  "p_adj",
+  "term_size",
+  "query_size",
+  "intersection_size",
+  "intersection"
+)]
+
+head(res_trans_pca_simple)
+```
+
+```{r}
+# Example loading plot for mRNA (component 2)
+plotLoadings(
+  pca.rna,
+  comp     = 2,
+  block    = "Y",
+  ndisplay = 10,
+  title    = "Top mRNA loadings, component 2"
+)
+```
+
+## =============================================================================
+## sPCA
+## =============================================================================
+
+```{r}
+# sPCA on mRNA
+pca.rna.sp <- spca(rna.scaled, ncomp = 2, keepX = c(10, 5))
+plotVar(pca.rna.sp, var.names = TRUE, title = "sPCA mRNA variables")
+
+plotLoadings(
+  pca.rna.sp,
+  comp     = 2,
+  block    = "Y",
+  ndisplay = 10,
+  title    = "Top mRNA loadings (sPCA), component 2"
+)
+```
+
+```{r}
+# sPCA on transcripts
+pca.trans.sp <- spca(trans.scaled, ncomp = 2, keepX = c(10, 5))
+plotVar(pca.trans.sp, var.names = TRUE, title = "sPCA trans variables")
+```
+
+```{r}
+# Enrichment for sPCA-selected transcript variables (component 1)
+trans_genes_c1 <- selectVar(pca.trans.sp, comp = 1)$name
+
+res.trans.c1 <- gost(
+  query             = trans_genes_c1,
+  organism          = "hsapiens",
+  correction_method = "fdr",
+  evcodes           = TRUE
+)
+
+gostplot(res.trans.c1)
+
+res_tab <- res.trans.c1$result
+res_tab$p_adj <- p.adjust(res_tab$p_value, method = "fdr")
+
+res_trans_simple <- res_tab[, c(
+  "source",
+  "term_name",
+  "p_value",
+  "p_adj",
+  "term_size",
+  "query_size",
+  "intersection_size",
+  "intersection"
+)]
+
+head(res_trans_simple)
+```
+
+```{r}
+# sPCA on protein
+pca.protein.sp <- spca(protein.scaled, ncomp = 2, keepX = c(10, 5))
+plotVar(pca.protein.sp, var.names = TRUE, title = "sPCA protein variables")
+```
+
+## =============================================================================
+## SUPERVISED ANALYSIS (PLS-DA)
+## =============================================================================
+
+```{r}
+# PLS-DA on mRNA
+group  <- info$Y
+
+plsda.rna <- plsda(rna.scaled, group, ncomp = 2)
+plotIndiv(plsda.rna, group = group, legend = TRUE, title = "PLS-DA mRNA")
+```
+
+```{r}
+# PLS-DA on transcripts
+plsda.trans <- plsda(trans.scaled, sample, ncomp = 2)
+plotIndiv(plsda.trans, group = sample, legend = TRUE, title = "PLS-DA trans")
+```
+```{r}
+# PLS-DA on proteins
+plsda.protein <- plsda(protein.scaled, sample, ncomp = 2)
+plotIndiv(plsda.protein, group = sample, legend = TRUE, title = "Protein PLS-DA")
+```
+
+## =============================================================================
+## PLS
+## =============================================================================
+
+```{r}
+# PLS to model associations between mRNA (X) and protein (Y)
+pls.res <- pls(X = rna.scaled, Y = protein.scaled, ncomp = 2)
+
+# Cross-validation to evaluate performance
+perf.pls <- perf(
+  pls.res,
+  validation  = "Mfold",
+  folds       = 5,
+  nrepeat     = 10,
+  progressBar = TRUE,
+  seed        = 24
+)
+
+# Performance metrics
+#perf.pls$measure$MSEP
+#perf.pls$measure$R2
+#perf.pls$measure$Q2.total
+```
+
+```{r}
+# PLS visualisations
+plotIndiv(pls.res, comp = c(1, 2), group = sample,
+          legend = TRUE, main = "PLS mRNA–protein (samples)")
+
+plotVar(pls.res, comp = c(1, 2), var.names = FALSE,legend = TRUE)
+
+plotArrow(pls.res, main = "Arrow plot: correlation between X and Y scores")
+```
+
+## =============================================================================
+## sPLS
+## =============================================================================
+
+```{r}
+# Sparse PLS for RNA–protein integration with feature selection
+spls.res <- spls(
+  X      = rna.scaled,
+  Y      = protein.scaled,
+  ncomp  = 2,
+  keepX  = c(10, 5),
+  keepY  = c(10, 5)
+)
+
+# Selected variables on each component
+selectVar(spls.res, comp = 1)$X$name
+selectVar(spls.res, comp = 1)$Y$name
+selectVar(spls.res, comp = 2)$X$name
+selectVar(spls.res, comp = 2)$Y$name
+
+```
+
+```{r}
+# Loadings for RNA block (component 1)
+plotLoadings(
+  spls.res,
+  comp     = 1,
+  block    = "X",
+  ndisplay = 20,
+  title    = "Top RNA loadings, sPLS component 1"
+)
+
+# Loadings for protein block (component 1)
+plotLoadings(
+  spls.res,
+  comp     = 1,
+  block    = "Y",
+  ndisplay = 20,
+  title    = "Top protein loadings, sPLS component 1"
+)
+
+
+plotIndiv(spls.res, comp = c(1,2), group = sample)
+
+```
+
+```{r}
+# Correlation circle plot for sPLS variables
+plotVar(
+  spls.res,
+  comp      = c(1, 2),
+  var.names = FALSE,
+  title     = "sPLS variable correlation plot",
+  legend = TRUE
+)
+
+```
+
+
+## sPLS - with machine learnong tuning 
+
+```{r}
+tune.res <- tune.spls(X = rna.scaled, Y = protein.scaled, ncomp = 2,
+                      test.keepX = c(5,10,15), test.keepY = c(5,10,15),
+                      validation = "Mfold", folds =9 )
+
+tune.res$choice.keepY
+
+spls.opt <- spls(
+  X = rna.scaled,
+  Y = protein.scaled,
+  ncomp = 2,
+  keepX = tune.res$choice.keepX,
+  keepY = tune.res$choice.keepY
+)
+
+plotVar(spls.opt,
+        comp      = c(1, 2),
+  var.names = FALSE,
+  title     = "sPLS variable correlation plot",
+  legend = TRUE
+)
+
+var_cor <- cor(spls.opt$variates$X, spls.opt$variates$Y)
+var_cor
+
+png()
+network(spls.opt,
+        comp = 1)
+
+dev.off()
+```
+
+```{r}
+# Sample plot for sPLS (RNA–protein)
+plotIndiv(
+  spls.res,
+  ind.names = TRUE,
+  group     = info$Y,
+  legend    = TRUE,
+  main      = "sPLS sample plot (RNA–protein)"
+)
+```
+
+```{r}
+# Enrichment of sPLS component 1 RNA features
+genes1    <- selectVar(spls.res, comp = 1)$X$name
+proteins1 <- selectVar(spls.res, comp = 1)$Y$name
+
+res.genes1 <- gost(
+  query             = genes1,
+  organism          = "hsapiens",
+  correction_method = "fdr",
+  evcodes           = TRUE,
+  multi_query       = FALSE
+)
+
+gostplot(res.genes1)
+
+res_tab <- res.genes1$result
+res_genes_simple <- res_tab[, c(
+  "source",
+  "term_name",
+  "p_value",
+  "term_size",
+  "query_size",
+  "intersection_size",
+  "intersection"
+)]
+
+head(res_genes_simple)
+
+datatable(
+  res_genes_simple,
+  options = list(pageLength = 20),
+  caption = "Enriched terms for genes1 with genes involved"
+)
+```
+
+```{r}
+# Enrichment of sPLS component 1 protein features
+res.protein1 <- gost(
+  query             = proteins1,
+  organism          = "hsapiens",
+  correction_method = "fdr",
+  evcodes           = TRUE,
+  multi_query       = FALSE
+)
+
+gostplot(res.protein1)
+
+res_tab <- res.protein1$result
+res_protein_simple <- res_tab[, c(
+  "source",
+  "term_name",
+  "p_value",
+  "term_size",
+  "query_size",
+  "intersection_size",
+  "intersection"
+)]
+
+head(res_protein_simple)
+
+datatable(
+  res_protein_simple,
+  options = list(pageLength = 5),
+  caption = "Enriched terms for proteins1 with genes involved"
+)
+```
+
+```{r}
+#  Enrichment for component 2 features
+genes2    <- selectVar(spls.res, comp = 2)$X$name
+proteins2 <- selectVar(spls.res, comp = 2)$Y$name
+
+res.genes2 <- gost(
+  query             = genes2,
+  organism          = "hsapiens",
+  correction_method = "fdr"
+)
+gostplot(res.genes2)
+
+res.protein2 <- gost(
+  query             = proteins2,
+  organism          = "hsapiens",
+  correction_method = "fdr"
+)
+gostplot(res.protein2)
+```
+
+## =============================================================================
+## DIABLO
+## =============================================================================
+
+```{r}
+# Align samples across omics and metadata
+common.samples <- Reduce(intersect, list(
+  rownames(rna.scaled),
+  rownames(protein.scaled),
+  rownames(trans.scaled),
+  info$sample
+))
+
+rna.scaled     <- rna.scaled[common.samples, , drop = FALSE]
+protein.scaled <- protein.scaled[common.samples, , drop = FALSE]
+trans.scaled   <- trans.scaled[common.samples, , drop = FALSE]
+info           <- info[match(common.samples, info$sample), ]
+
+stopifnot(all(rownames(rna.scaled)     == common.samples))
+stopifnot(all(rownames(protein.scaled) == common.samples))
+stopifnot(all(rownames(trans.scaled)   == common.samples))
+stopifnot(all(info$sample              == common.samples))
+
+Y <- factor(info$Y)
+
+sapply(list(rna = rna.scaled,
+            protein = protein.scaled,
+            trans = trans.scaled), dim)
+length(Y)
+view(Y)
+```
+
+```{r}
+## 2-block DIABLO: rna + protein
+X_2 <- list(
+  rna     = rna.scaled,
+  protein = protein.scaled
+)
+
+design_2 <- matrix(0.1, nrow = length(X_2), ncol = length(X_2))
+diag(design_2) <- 0
+colnames(design_2) <- rownames(design_2) <- names(X_2)
+
+test.keepX_2 <- list(
+  rna     = c(5, 10),
+  protein = c(5, 10)
+)
+
+set.seed(123)
+tune_2 <- tune.block.splsda(
+  X          = X_2,
+  Y          = Y,
+  ncomp      = 2,
+  test.keepX = test.keepX_2,
+  design     = design_2,
+  validation = "Mfold",
+  folds      = 9,
+  nrepeat    =10,
+  dist       = "centroids.dist",
+  measure    = "BER",
+  progressBar = TRUE,
+  BPPARAM     = SerialParam()
+)
+
+final.keepX_2 <- tune_2$choice.keepX
+
+diablo_2 <- block.splsda(
+  X      = X_2,
+  Y      = Y,
+  ncomp  = 2,
+  keepX  = final.keepX_2,
+  design = design_2
+)
+
+perf_2 <- perf(
+  diablo_2,
+  validation = "Mfold",
+  folds      = 9,
+  nrepeat    = 10
+)
+```
+
+
+```{r}
+## Overall object
+perf_2
+
+## 1) Balanced error rate (BER) per component
+perf_2$error.rate  # or $error.rate$overall depending on version
+perf_2$error.rate.per.class.all
+
+## 2) Plot error vs number of components
+plot(perf_2)    # built-in plot: error rate per component
+
+```
+
+```{r}
+# 2-block DIABLO plots to PDF
+#png("diablo_genes_rna1.png", width = 2400, height = 1800, res = 300)
+plotDiablo(diablo_2, ncomp = 1)
+circosPlot(diablo_2, comp = 1, cutoff = 0.6, size.variables = 0.5)
+#dev.off()
+
+#png("diablo_genes_rna2.png", width = 2400, height = 1800, res = 300)
+
+plotDiablo(diablo_2, ncomp = 2)
+circosPlot(diablo_2, comp = 2, cutoff = 0.6, size.variables = 0.5)
+
+#dev.off()
+
+comp_list1 <- list(rna = 1, protein = 1)
+comp_list2 <- list(rna = 2, protein = 2)
+
+#png("Network_genes_rna1.png", width = 2400, height = 1800, res = 300)
+#par(mfrow = c(1, 1), mar = c(5, 4, 4, 2))
+#network(diablo_2, comp = comp_list1, cutoff = 0.6,
+       # graph.scale = 0.4, cex.node.name = 0.5)
+#dev.off()
+
+#png("Network_genes_rna2.png", width = 2400, height = 1800, res = 300)
+#par(mfrow = c(1, 1), mar = c(5, 4, 4, 2))
+#network(diablo_2, comp = comp_list2, cutoff = 0.6,
+        #graph.scale = 0.4, cex.node.name = 0.5)
+#dev.off()
+
+plotVar(diablo_2, block = "rna",     comp = c(1, 2), var.names = FALSE)
+plotVar(diablo_2, block = "protein", comp = c(1, 2), var.names = FALSE)
+```
+
+```{r}
+## 3-block DIABLO: rna + protein + trans
+X_3 <- list(
+  rna     = rna.scaled,
+  protein = protein.scaled,
+  trans   = trans.scaled
+)
+
+design_3 <- matrix(0.1, nrow = length(X_3), ncol = length(X_3))
+diag(design_3) <- 0
+colnames(design_3) <- rownames(design_3) <- names(X_3)
+
+test.keepX_3 <- list(
+  rna     = c(5, 10),
+  protein = c(5, 10),
+  trans   = c(5, 10)
+)
+
+set.seed(123)
+tune_3 <- tune.block.splsda(
+  X          = X_3,
+  Y          = Y,
+  ncomp      = 3,
+  test.keepX = test.keepX_3,
+  design     = design_3,
+  validation = "Mfold",
+  folds      = 3,
+  nrepeat    = 10,
+  dist       = "centroids.dist",
+  measure    = "BER",
+  progressBar = TRUE,
+  BPPARAM     = BiocParallel::SerialParam()
+)
+
+final.keepX_3 <- tune_3$choice.keepX
+
+diablo_3 <- block.splsda(
+  X      = X_3,
+  Y      = Y,
+  ncomp  = 3,
+  keepX  = final.keepX_3,
+  design = design_3
+)
+
+names(diablo_3$X)
+
+#png("net_comp1_proteins_genes_trans.png", width = 2400, height = 1800, res = 300)
+plotDiablo(diablo_3, ncomp = 1)
+circosPlot(diablo_3, comp = 1, cutoff = 0.6, size.variables = 0.5)
+#dev.off()
+
+comp_list1 <- list(rna = 1, protein = 1)
+#png("Network_genes_rna_trans1.png", width = 2400, height = 1800, res = 300)
+#par(mfrow = c(1, 1), mar = c(5, 4, 4, 2))
+#network(diablo_3, comp = comp_list1, cutoff = 0.6,
+        #graph.scale = 0.4, cex.node.name = 0.5)
+#dev.off()
+
+
+#png("net_comp2_proteins_genes_trans.png", width = 2400, height = 1800, res = 300)
+plotDiablo(diablo_3, ncomp = 2)
+circosPlot(diablo_3, comp = 2, cutoff = 0.6, size.variables = 0.5)
+#dev.off()
+```
+
+```{r}
+## Performance of 3-block DIABLO
+perf_3 <- perf(
+  diablo_3,
+  validation = "Mfold",
+  folds      = 3,
+  nrepeat    = 10
+)
+
+perf_3          
+
+## 2) Plot error vs number of components
+plot(perf_3)
+
+```
+
+##==============================================================================
+## NETWORK ANALYSIS
+##==============================================================================
+
+```{r}
+################################################################################
+# STEP 7 - NETWORK ANALYSIS
+# Part 1: Gene Regulatory Network (GRN)
+################################################################################
+
+genes.use <- unique(c(
+  selectVar(diablo_2, block = "rna", comp = 1)$rna$name,
+  selectVar(diablo_2, block = "rna", comp = 2)$rna$name
+))
+
+proteins.use <- unique(c(
+  selectVar(diablo_2, block = "protein", comp = 1)$protein$name,
+  selectVar(diablo_2, block = "protein", comp = 2)$protein$name
+))
+
+genes.use
+proteins.use
+length(genes.use)
+length(proteins.use)
+```
+
+```{r}
+library(igraph)
+
+# Subset RNA matrix on selected DIABLO genes
+rna.net <- rna.scaled[, colnames(rna.scaled) %in% genes.use, drop = FALSE]
+
+dim(rna.net)
+colnames(rna.net)
+
+# Correlation matrix between selected genes
+cor.grn <- cor(rna.net, use = "pairwise.complete.obs", method = "pearson")
+
+# Threshold for edge creation
+thr.grn <- 0.7
+
+adj.grn <- abs(cor.grn) >= thr.grn
+diag(adj.grn) <- 0
+
+# Build graph
+g.grn <- graph_from_adjacency_matrix(adj.grn, mode = "undirected", diag = FALSE)
+g.grn <- igraph::simplify(g.grn, remove.multiple = TRUE, remove.loops = TRUE)
+
+# Basic statistics
+grn_nodes <- vcount(g.grn)
+grn_edges <- ecount(g.grn)
+grn_degree <- degree(g.grn)
+grn_isolated <- sum(grn_degree == 0)
+grn_top_gene <- names(which.max(grn_degree))
+
+grn_nodes
+grn_edges
+grn_isolated
+grn_top_gene
+
+sort(grn_degree, decreasing = TRUE)
+```
+
+
+```{r}
+hist(grn_degree,
+     main = "GRN degree distribution",
+     xlab = "Degree",
+     col = "lightblue",
+     border = "black")
+
+
+set.seed(1)
+lay <- layout_with_kk(g.grn)   # Fruchterman–Reingold (more spread)
+# alternatives: layout_with_kk, layout_with_graphopt, layout_with_drl
+
+png("GRN_big_nodes_spread.png", width = 1600, height = 1200, res = 200)
+
+plot(
+  g.grn,
+  layout             = lay,
+  main               = "Gene Regulatory Network",
+  vertex.size        = 45,
+  vertex.label.cex   = 0.45,
+  vertex.label.color = "black"
+)
+
+dev.off()
+```
+
+```{r}
+grn_density <- igraph::edge_density(g.grn)
+grn_components <- igraph::components(g.grn)
+
+grn_density
+grn_components$no
+grn_components$csize
+```
+```{r}
+grn_summary <- data.frame(
+  nodes = grn_nodes,
+  edges = grn_edges,
+  isolated_nodes = grn_isolated,
+  density = grn_density,
+  connected_components = grn_components$no,
+  top_gene = grn_top_gene
+)
+
+sort(grn_degree, decreasing = TRUE)
+```
+
+```{r}
+human_gene_protein <- readRDS("human_gene_to_coding_protein.Rds")
+human_ppi <- readRDS("human_ppi.Rds")
+human_tf_gene <- readRDS("human_TF_to_targeted_gene.Rds")
+```
+
+
+```{r}
+class(human_gene_protein)
+class(human_ppi)
+class(human_tf_gene)
+
+str(human_gene_protein)
+str(human_ppi)
+str(human_tf_gene)
+
+head(human_gene_protein)
+head(human_ppi)
+head(human_tf_gene)
+
+colnames(human_gene_protein)
+colnames(human_ppi)
+colnames(human_tf_gene)
+```
+```{r}
+
+gp <- as.data.frame(human_gene_protein)
+ppi <- as.data.frame(human_ppi)
+tfg <- as.data.frame(human_tf_gene)
+
+gp <- gp[, 1:2, drop = FALSE]
+ppi <- ppi[, 1:2, drop = FALSE]
+tfg <- tfg[, 1:2, drop = FALSE]
+
+colnames(gp) <- c("from", "to")
+colnames(ppi) <- c("from", "to")
+colnames(tfg) <- c("from", "to")
+
+head(gp)
+head(ppi)
+head(tfg)
+```
+
+
+```{r}
+#PPI
+ppi.sub <- ppi %>%
+  filter(from %in% proteins.use, to %in% proteins.use)
+
+g.ppi <- graph_from_data_frame(ppi.sub, directed = FALSE)
+g.ppi <- igraph::simplify(g.ppi, remove.multiple = TRUE, remove.loops = TRUE)
+
+ppi_nodes <- igraph::vcount(g.ppi)
+ppi_edges <- igraph::ecount(g.ppi)
+ppi_degree <- igraph::degree(g.ppi)
+ppi_isolated <- sum(ppi_degree == 0)
+ppi_top_protein <- names(which.max(ppi_degree))
+
+ppi_nodes
+ppi_edges
+ppi_isolated
+ppi_top_protein
+sort(ppi_degree, decreasing = TRUE)
+```
+
+```{r}
+#PROTEIN CODINNG LINKS
+gp.sub <- gp %>%
+  filter(from %in% genes.use, to %in% proteins.use)
+
+gp.sub
+nrow(gp.sub)
+```
+
+```{r}
+#TF-GENE LINKS
+tfg.sub <- tfg %>%
+  filter(to %in% genes.use)
+nrow(tfg.sub)
+head(tfg.sub)
+```
+
+```{r}
+#TF-GENE RESTREINT TO SELECTED PROTEINS
+tfg.sub2 <- tfg %>%
+  filter(from %in% proteins.use, to %in% genes.use)
+
+nrow(tfg.sub2)
+head(tfg.sub2)
+```
+```{r}
+# EXTENDED PPI
+ppi.sub.ext <- ppi %>%
+  filter(from %in% proteins.use | to %in% proteins.use)
+
+head(ppi.sub.ext)
+nrow(ppi.sub.ext)
+
+g.ppi.ext <- graph_from_data_frame(ppi.sub.ext, directed = FALSE)
+g.ppi.ext <- igraph::simplify(g.ppi.ext, remove.multiple = TRUE, remove.loops = TRUE)
+
+ppi_ext_nodes <- igraph::vcount(g.ppi.ext)
+ppi_ext_edges <- igraph::ecount(g.ppi.ext)
+ppi_ext_degree <- igraph::degree(g.ppi.ext)
+ppi_ext_top <- names(which.max(ppi_ext_degree))
+
+ppi_ext_nodes
+ppi_ext_edges
+ppi_ext_top
+sort(ppi_ext_degree, decreasing = TRUE)[1:10]
+```
+The combined network is dominated by protein hubs, with P46783 emerging as the
+most central node, indicating a potential key regulatory or structural role in 
+the integrated system.
+## =============================================================================
+## MULTI OMICS NETWORK
+## =============================================================================
+```{r}
+# COMBINED MULTI-OMICS NETWORK
+
+# GRN edges
+edges.grn <- as_data_frame(g.grn, what = "edges")
+edges.grn$type <- "GRN"
+
+# Extended PPI edges
+edges.ppi <- as_data_frame(g.ppi.ext, what = "edges")
+edges.ppi$type <- "PPI"
+
+# TF -> gene edges
+edges.tfg <- tfg.sub
+edges.tfg$type <- "TF_gene"
+
+# Combine all edges
+all.edges <- bind_rows(edges.grn, edges.ppi, edges.tfg) %>%
+  distinct()
+
+head(all.edges)
+nrow(all.edges)
+
+# Build combined network
+g.multi <- graph_from_data_frame(all.edges, directed = FALSE)
+g.multi <- igraph::simplify(g.multi, remove.multiple = TRUE, remove.loops = TRUE)
+
+# Basic stats
+multi_nodes <- igraph::vcount(g.multi)
+multi_edges <- igraph::ecount(g.multi)
+multi_degree <- igraph::degree(g.multi)
+multi_density <- igraph::edge_density(g.multi)
+multi_components <- igraph::components(g.multi)
+
+multi_nodes
+multi_edges
+multi_density
+multi_components$no
+multi_components$csize
+sort(multi_degree, decreasing = TRUE)[1:10]
+```
+
+## ============================================================================
+## MODULARITY ANALYSIS
+## ============================================================================
+```{r}
+clust <- cluster_louvain(g.multi)
+
+mod_score <- modularity(clust)
+module_membership <- membership(clust)
+
+mod_score
+table(module_membership)
+```
+
+
+```{r}
+
+# 1) Define which nodes to label (example: top 20 by degree)
+deg <- degree(g.multi)
+top_ids <- order(deg, decreasing = TRUE)[1:10]
+
+labels <- rep(NA, vcount(g.multi))
+labels[top_ids] <- V(g.multi)$name[top_ids]
+
+
+set.seed(1)
+lay <- layout_with_fr(g.multi)   
+
+# 2) PNG device
+pdf("multiomics_network_big.pdf", width = 12, height = 10)
+plot(
+  clust, g.multi,
+  layout           = lay,
+  vertex.size      = 12,
+  vertex.label     = labels,
+  vertex.label.cex = 0.5,
+  main             = "Combined multi-omics network with Louvain modules"
+)
+dev.off()
+```
+The modularity score (~0.62) indicates a strong community structure, suggesting 
+that the network is organized into well-defined functional modules.
+The network is structured into six modules of varying sizes, with one dominant 
+module and several smaller specialized communities
+
+## ============================================================================
+## RANDOM WALK
+## ============================================================================
+```{r}
+seed.node <- names(which.max(multi_degree))
+seed.node
+set.seed(123)
+rw <- random_walk(g.multi, start = seed.node, steps = 50)
+rw_freq <- sort(table(rw), decreasing = TRUE)
+rw_freq
+head(rw_freq, 10)
+```
+
+
+
+
+```{r}
+module_sizes <- sort(table(module_membership), decreasing = TRUE)
+module_sizes
+
+largest_module <- as.numeric(names(module_sizes)[1])
+largest_nodes <- names(module_membership[module_membership == largest_module])
+
+
+length(largest_nodes)
+
+top_module_nodes <- names(sort(multi_degree[largest_nodes], decreasing = TRUE))[1:50]
+
+res_module <- gost(query = top_module_nodes, organism = "hsapiens",correction_method = "fdr",
+  evcodes           = TRUE,
+  multi_query       = FALSE)
+
+res.tab <- res_module$result
+gostplot(res_module)
+res.table  <- res.tab[, c(
+  "source",
+  "term_name",
+  "p_value",
+  "term_size",
+  "query_size",
+  "intersection_size",
+  "intersection"
+)]
+
+datatable(res.table
+          ,options = list(pageLength = 20),
+  caption = "Enriched terms for involved")
+
+```
+The largest module of the integrated network showed strong enrichment for CORUM 
+complexes, suggesting that the nodes grouped by the modularity analysis 
+participate in shared molecular assemblies. This reinforces the biological 
+validity of the network structure and indicates that the integrated graph 
+captures coordinated functional units.
+
+## CONCLUSION
+
+A multi-mics network was constructed by integrating the gene regulatory network, 
+the extended protein-protein interaction network, and TF-gene relationships. 
+The final graph contained 1546 nodes and 783 edges and formed a single connected 
+component, showing that the different omics layers were successfully integrated 
+into a coherent network. Topological analysis revealed a sparse but highly 
+structured biological network, dominated by central hub proteins such as P46783. 
+Louvain clustering identified six modules with a high modularity score (0.6169), 
+indicating strong community organization. A random walk initiated from the main 
+hub remained centered around this node, confirming its key topological role. 
+Finally, enrichment analysis of the largest module identified several significantly 
+enriched CORUM complexes, supporting the biological relevance of the detected 
+communities.
+
+
