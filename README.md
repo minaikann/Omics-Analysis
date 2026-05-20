@@ -1,6 +1,6 @@
 ﻿# Omics Data Analysis in R
 
-This repository contains beginner-friendly notes and examples on different approaches used to analyze omics data. It covers PCA, differential analysis, and multi-omics integration using various R tools and packages.
+This repository contains beginner-friendly notes and examples on different approaches used to analyze omics data from diffrent published articcles. It covers PCA, differential analysis, and multi-omics integration using various R tools and packages.
 
 ## What is inside
 - PCA for exploring patterns in omics data.
@@ -12,10 +12,9 @@ This repository contains beginner-friendly notes and examples on different appro
 The goal of this repository is to help beginners understand how omics data can be analyzed using simple and practical approaches in R.
 
 ## Tools used
-- R
-- mixOmics package
+- R and various statistical and Bioinfomatics packages 
 
-## Topics covered
+## Area covered
 - Principal Component Analysis (PCA)
 - Differential expression / differential analysis
 - Multi-omics integration
