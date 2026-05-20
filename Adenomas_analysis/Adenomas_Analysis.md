@@ -28,7 +28,7 @@ The main R packages used in this analysis are:
 
 - `mixOmics`
 - `limma`
-- `ANCOMBC`
+- `ANCOM-BC`
 
 ## Scope
 
