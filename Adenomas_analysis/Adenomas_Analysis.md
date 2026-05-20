@@ -1,4 +1,4 @@
-# Exploratory Replication of Kim et al. (2020)
+<img width="1688" height="220" alt="image" src="https://github.com/user-attachments/assets/43b080b3-44ff-42c8-af91-34a9d5358e3a" /># Exploratory Replication of Kim et al. (2020)
 
 ## Overview
 
@@ -1137,10 +1137,9 @@ plotLoadings(final.diablo, block = "metabolomics", comp = 2, contrib = "max")
 plotLoadings(final.diablo, block = "metagenomics", comp = 2, contrib = "max")
 ```
 
-# 6. LASSO classification of metabolites
+# 6. LASSO Adenoma Metabolite signature
 
-Finally, I fit a LASSO logistic regression model to classify control vs adenoma samples based on metabolites.  
-This serves as a simple supervised learning example, with cross-validation, ROC curves, and interpretation of selected metabolites.
+Finally, I fit a LASSO logistic regression model to select a small set of metabolites most strongly associated with adenoma vs control, providing an exploratory adenoma metabolite signature.
 
 ```{r lasso_nested_cv_CA, message=FALSE, warning=FALSE}
 library(glmnet)
