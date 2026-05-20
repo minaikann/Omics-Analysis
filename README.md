@@ -9,12 +9,13 @@ This repository contains beginner-friendly notes and examples on different appro
 - R packages and tools used for omics analysis.
 
 ## Goal
-The goal of this repository is to help beginners understand how omics data can be analyzed using simple and practical approaches in R.
+The goal of this repository is to explore diffrent Statistical and Bioinfomatics approches used in omics data in R.
 
 ## Tools used
 - R and various statistical and Bioinfomatics packages 
 
 ## Area covered
+- Statistical tests 
 - Principal Component Analysis (PCA)
 - Differential expression / differential analysis
 - Multi-omics integration
