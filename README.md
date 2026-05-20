@@ -13,7 +13,7 @@ The goal of this repository is to help beginners understand how omics data can b
 
 ## Tools used
 - R
-- Common bioinformatics and omics packages
+- mixOmics package
 
 ## Topics covered
 - Principal Component Analysis (PCA)
