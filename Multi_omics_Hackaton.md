@@ -2,11 +2,7 @@
 title: "Multi-Omics Analysis of Adenomas"
 author: "Deborah Mina Ikann"
 date: "`r Sys.Date()`"
-output: 
-  html_document:
-    toc: true
-    toc_float: true
-    code_folding: hide
+
 ---
 
 ```{r setup, include=FALSE}
